@@ -673,6 +673,16 @@ int oplus_ofp_property_update(void *sde_connector, void *sde_connector_state, in
 	switch (prop_id) {
 	case CONNECTOR_PROP_HBM_ENABLE:
 		if (prop_val != p_oplus_ofp_params->hbm_enable) {
+			if (p_oplus_ofp_params->need_to_update_lhbm_pressed_icon_gamma
+					&& (p_oplus_ofp_params->hbm_enable & (OPLUS_OFP_PROPERTY_DIM_LAYER | OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER))
+					&& !(prop_val & (OPLUS_OFP_PROPERTY_DIM_LAYER | OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER))) {
+				if (p_oplus_ofp_params->fp_press) {
+					p_oplus_ofp_params->fp_press = false;
+					OFP_INFO("oplus_ofp_fp_press:%d (fod bits dropped)\n", p_oplus_ofp_params->fp_press);
+					OPLUS_OFP_TRACE_INT("oplus_ofp_fp_press", p_oplus_ofp_params->fp_press);
+				}
+			}
+
 			OFP_INFO("HBM_ENABLE:%llu,dim:%llu,fingerpress:%llu,icon:%llu,aod:%llu\n", prop_val, (prop_val & OPLUS_OFP_PROPERTY_DIM_LAYER),
 				(prop_val & OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER), (prop_val & OPLUS_OFP_PROPERTY_ICON_LAYER),
 					(prop_val & OPLUS_OFP_PROPERTY_AOD_LAYER));
@@ -688,6 +698,8 @@ int oplus_ofp_property_update(void *sde_connector, void *sde_connector_state, in
 		OPLUS_OFP_TRACE_INT("oplus_ofp_hbm_enable", p_oplus_ofp_params->hbm_enable);
 
 		msm_property_set_dirty(&c_conn->property_info, &c_state->property_state, CONNECTOR_PROP_HBM_ENABLE);
+		if (oplus_ofp_local_hbm_is_enabled())
+			oplus_ofp_lhbm_handle(display);
 		break;
 
 	default:
@@ -2217,7 +2229,7 @@ int oplus_ofp_lhbm_handle(void *dsi_display)
 
 	OFP_DEBUG("start\n");
 
-	if (!(oplus_ofp_local_hbm_is_enabled() && oplus_ofp_local_hbm_unlocking_acceleration_is_enabled())) {
+	if (!oplus_ofp_local_hbm_is_enabled()) {
 		OFP_DEBUG("no need to handle lhbm\n");
 		return 0;
 	}
@@ -2256,12 +2268,14 @@ int oplus_ofp_lhbm_handle(void *dsi_display)
 	bl_level = display->panel->bl_config.bl_level;
 	OFP_DEBUG("bl_level=%u\n", bl_level);
 
-	if (p_oplus_ofp_params->fp_press && bl_level) {
+	if (p_oplus_ofp_params->fp_press && bl_level
+			&& (p_oplus_ofp_params->hbm_enable & OPLUS_OFP_PROPERTY_DIM_LAYER
+				|| p_oplus_ofp_params->hbm_enable & OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER)) {
 		rc = oplus_ofp_set_panel_hbm(c_conn, true);
 		if (rc) {
 			OFP_ERR("failed to set panel hbm on\n");
 		}
-	} else if (!p_oplus_ofp_params->fp_press || !bl_level) {
+	} else {
 		rc = oplus_ofp_set_panel_hbm(c_conn, false);
 		if (rc) {
 			OFP_ERR("failed to set panel hbm off\n");
@@ -3427,7 +3441,14 @@ int oplus_ofp_power_mode_handle(void *dsi_display, int power_mode)
 							OFP_ERR("[%s] failed to send DSI_CMD_HBM_OFF cmds, rc=%d\n", display->name, rc);
 						}
 					}
+					oplus_ofp_set_hbm_state(false);
 				}
+			}
+
+			if (p_oplus_ofp_params->fp_press) {
+				p_oplus_ofp_params->fp_press = false;
+				OFP_INFO("oplus_ofp_fp_press:%d\n", p_oplus_ofp_params->fp_press);
+				OPLUS_OFP_TRACE_INT("oplus_ofp_fp_press", p_oplus_ofp_params->fp_press);
 			}
 
 			/* reset aod unlocking flag when fingerprint unlocking failed */
@@ -3509,6 +3530,11 @@ int oplus_ofp_power_mode_handle(void *dsi_display, int power_mode)
 				OFP_ERR("[%s] failed to handle aod off, rc=%d\n", display->name, rc);
 			}
 		}
+		if (p_oplus_ofp_params->fp_press) {
+			p_oplus_ofp_params->fp_press = false;
+			OFP_INFO("oplus_ofp_fp_press:%d\n", p_oplus_ofp_params->fp_press);
+			OPLUS_OFP_TRACE_INT("oplus_ofp_fp_press", p_oplus_ofp_params->fp_press);
+		}
 		break;
 
 	case SDE_MODE_DPMS_OFF:
@@ -3523,6 +3549,11 @@ int oplus_ofp_power_mode_handle(void *dsi_display, int power_mode)
 			if (rc) {
 				OFP_ERR("[%s] failed to handle aod off, rc=%d\n", display->name, rc);
 			}
+		}
+		if (p_oplus_ofp_params->fp_press) {
+			p_oplus_ofp_params->fp_press = false;
+			OFP_INFO("oplus_ofp_fp_press:%d\n", p_oplus_ofp_params->fp_press);
+			OPLUS_OFP_TRACE_INT("oplus_ofp_fp_press", p_oplus_ofp_params->fp_press);
 		}
 		break;
 
@@ -3930,6 +3961,8 @@ int oplus_ofp_touchpanel_event_notifier_call(struct notifier_block *nb, unsigned
 
 			if (tp_event->touch_state == 1) {
 				OFP_INFO("tp touchdown\n");
+				if (oplus_ofp_notify_fp_press(&tp_event->touch_state))
+					OFP_INFO("failed to notify fp down event");
 				if (oplus_ofp_video_mode_30hz_aod_is_enabled() && oplus_ofp_get_aod_state()) {
 					event.type = DRM_EVENT_TP_TOUCHDOWN;
 					event.length = sizeof(bool);
@@ -3940,6 +3973,10 @@ int oplus_ofp_touchpanel_event_notifier_call(struct notifier_block *nb, unsigned
 					/* send aod off cmds in doze mode to speed up fingerprint unlocking */
 					oplus_ofp_aod_off_set();
 				}
+			} else if (tp_event->touch_state == 0) {
+				OFP_INFO("tp touchup\n");
+				if (oplus_ofp_notify_fp_press(&tp_event->touch_state))
+					OFP_INFO("failed to notify fp up event");
 			}
 		}
 	}
